@@ -1,0 +1,10 @@
+http:
+  addr: ":3000"
+
+img:
+  folder: "app-data/images"
+  timeout: 5
+
+cache:
+  max_size: 52428800
+  path: "app-data/cache/data.json"
