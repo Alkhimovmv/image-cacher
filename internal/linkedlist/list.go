@@ -1,10 +1,9 @@
 package linkedlist
 
-
 type List[V any] struct {
 	head *Item[V]
 	tail *Item[V]
-	len int
+	len  int
 }
 
 func New[V any]() *List[V] {
@@ -53,4 +52,23 @@ func (l *List[V]) PushBack(value V) *Item[V] {
 	l.len++
 
 	return item
+}
+
+func (l *List[V]) Remove(item *Item[V]) {
+	if item.prev != nil {
+		item.prev.next = item.next
+	} else {
+		l.head = item.next
+	}
+
+	if item.next != nil {
+		item.next.prev = item.prev
+	} else {
+		l.tail = item.prev
+	}
+
+	item.prev = nil
+	item.next = nil
+
+	l.len--
 }
