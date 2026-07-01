@@ -34,3 +34,23 @@ func (l *List[V]) PushFront(value V) *Item[V] {
 
 	return item
 }
+
+func (l *List[V]) PushBack(value V) *Item[V] {
+	item := &Item[V]{
+		Value: value,
+	}
+
+	if l.len == 0 {
+		l.head = item
+		l.tail = item
+		l.len++
+		return item
+	}
+
+	item.prev = l.tail
+	l.tail.next = item
+	l.tail = item
+	l.len++
+
+	return item
+}
