@@ -72,3 +72,24 @@ func (l *List[V]) Remove(item *Item[V]) {
 
 	l.len--
 }
+
+func (l *List[V]) MoveToFront(item *Item[V]) {
+	if item == nil || l.head == item {
+		return
+	}
+
+	if item.prev != nil {
+		item.prev.next = item.next
+	}
+
+	if item.next != nil {
+		item.next.prev = item.prev
+	} else {
+		l.tail = item.prev
+	}
+
+	item.prev = nil
+	item.next = l.head
+	l.head.prev = item
+	l.head = item
+}
