@@ -1,6 +1,7 @@
 package img
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,7 +67,7 @@ func TestDownloadReturnsErrorForInvalidContentType(t *testing.T) {
 	}
 }
 
-func TestDownloadReturnsErrorForNonOKStatus(t *testing.T) {
+func TestDownloadReturnsStatusErrorForNonOKStatus(t *testing.T) {
 	dir := t.TempDir()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +80,40 @@ func TestDownloadReturnsErrorForNonOKStatus(t *testing.T) {
 	_, err := Download(server.URL, dir, "test-file", 5*time.Second)
 	if err == nil {
 		t.Fatal("ожидали ошибку для ответа не 200 OK, получили nil")
+	}
+
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("ожидали ошибку типа StatusError, получили %v", err)
+	}
+
+	if statusErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("ожидали статус 404 внутри ошибки, получили %d", statusErr.StatusCode)
+	}
+}
+
+func TestDownloadAcceptsAny2xxStatus(t *testing.T) {
+	dir := t.TempDir()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte("created-image"))
+	}))
+	defer server.Close()
+
+	result, err := Download(server.URL, dir, "created-file", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ожидали успешное скачивание для 201 Created, получили ошибку %v", err)
+	}
+
+	data, err := os.ReadFile(result.Path)
+	if err != nil {
+		t.Fatalf("не удалось прочитать сохранённый файл: %v", err)
+	}
+
+	if string(data) != "created-image" {
+		t.Fatalf("ожидали содержимое created-image, получили %s", string(data))
 	}
 }
 

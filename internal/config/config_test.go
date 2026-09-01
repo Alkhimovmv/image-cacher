@@ -8,8 +8,8 @@ func TestLoadReadsConfigFromYAMLFile(t *testing.T) {
 		t.Fatalf("ожидали, что конфиг прочитается без ошибки, получили %v", err)
 	}
 
-	if cfg.HTTP.Addr != ":3000" {
-		t.Fatalf("ожидали http.addr = :3000, получили %s", cfg.HTTP.Addr)
+	if cfg.HTTP.Addr != ":3001" {
+		t.Fatalf("ожидали http.addr = :3001, получили %s", cfg.HTTP.Addr)
 	}
 
 	if cfg.Img.Folder != "app-data/images" {
