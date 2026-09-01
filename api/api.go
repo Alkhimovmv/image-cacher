@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const defaultMaxCacheSize = 50 * 1024 * 1024
+
 type Api struct {
 	imgFolder string
 	cachePath string
@@ -25,7 +27,7 @@ func New() *Api {
 		"app-data/images",
 		"app-data/cache/data.json",
 		5*time.Second,
-		50*1024*1024,
+		defaultMaxCacheSize,
 	)
 }
 

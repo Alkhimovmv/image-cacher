@@ -21,43 +21,13 @@ func (a *Api) Image(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	if ok {
-		data, err := os.ReadFile(cached.Path)
-		if err != nil {
-			a.logger.Error(
-				"failed to read cached image",
-				"method", r.Method,
-				"uri", r.RequestURI,
-				"host", r.Host,
-				"error", err,
-			)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", cached.ContentType)
-		w.Header().Set("X-IMAGE-CACHE-HIT", "true")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		a.writeCachedImage(w, r, cached)
 		return
 	}
 
 	result, err := a.download(origin, a.imgFolder, fileName, a.timeout)
 	if err != nil {
-		a.logger.Error(
-			"failed to download image",
-			"method", r.Method,
-			"uri", r.RequestURI,
-			"host", r.Host,
-			"error", err,
-		)
-
-		var statusErr *img.StatusError
-		if errors.As(err, &statusErr) {
-			w.WriteHeader(statusErr.StatusCode)
-			return
-		}
-
-		w.WriteHeader(http.StatusInternalServerError)
+		a.handleDownloadError(w, r, err)
 		return
 	}
 
@@ -78,6 +48,48 @@ func (a *Api) Image(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.writeDownloadedImage(w, r, result)
+}
+
+func (a *Api) writeCachedImage(w http.ResponseWriter, r *http.Request, cached img.DownloadResult) {
+	data, err := os.ReadFile(cached.Path)
+	if err != nil {
+		a.logger.Error(
+			"failed to read cached image",
+			"method", r.Method,
+			"uri", r.RequestURI,
+			"host", r.Host,
+			"error", err,
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", cached.ContentType)
+	w.Header().Set("X-IMAGE-CACHE-HIT", "true")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (a *Api) handleDownloadError(w http.ResponseWriter, r *http.Request, err error) {
+	a.logger.Error(
+		"failed to download image",
+		"method", r.Method,
+		"uri", r.RequestURI,
+		"host", r.Host,
+		"error", err,
+	)
+
+	var statusErr *img.StatusError
+	if errors.As(err, &statusErr) {
+		w.WriteHeader(statusErr.StatusCode)
+		return
+	}
+
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
+func (a *Api) writeDownloadedImage(w http.ResponseWriter, r *http.Request, result img.DownloadResult) {
 	data, err := os.ReadFile(result.Path)
 	if err != nil {
 		a.logger.Error(
