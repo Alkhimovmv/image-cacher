@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"image_cache/api"
+	"image_cache/internal/cache"
 	"image_cache/internal/config"
+	"image_cache/internal/img"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,13 +18,18 @@ func loadConfig() (config.Config, error) {
 	return config.Load("config/config.yml")
 }
 
-func newApiFromConfig(cfg config.Config) *api.Api {
-	return api.NewWithConfig(
+func newAPIFromConfig(cfg config.Config, logger *slog.Logger) *api.Api {
+	imageAdapter := img.New(
 		cfg.Img.Folder,
-		cfg.Cache.Path,
 		time.Duration(cfg.Img.Timeout)*time.Second,
-		cfg.Cache.MaxSize,
 	)
+	cacheAdapter := cache.New(cfg.Cache.Path, cfg.Cache.MaxSize)
+
+	return api.New(api.Config{
+		Image:  imageAdapter,
+		Cache:  cacheAdapter,
+		Logger: logger,
+	})
 }
 
 func newHTTPServer(cfg config.Config, logger *slog.Logger, handler http.Handler) *http.Server {
@@ -71,7 +78,7 @@ func run() error {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	apiInstance := newApiFromConfig(cfg)
+	apiInstance := newAPIFromConfig(cfg, logger)
 
 	err = apiInstance.RestoreCache()
 	if err != nil {

@@ -20,8 +20,8 @@ func TestLoadReadsConfigFromYAMLFile(t *testing.T) {
 		t.Fatalf("ожидали img.timeout = 5, получили %d", cfg.Img.Timeout)
 	}
 
-	if cfg.Cache.MaxSize != 52428800 {
-		t.Fatalf("ожидали cache.max_size = 52428800, получили %d", cfg.Cache.MaxSize)
+	if cfg.Cache.MaxSize != 50000 {
+		t.Fatalf("ожидали cache.max_size = 50000, получили %d", cfg.Cache.MaxSize)
 	}
 
 	if cfg.Cache.Path != "app-data/cache/data.json" {

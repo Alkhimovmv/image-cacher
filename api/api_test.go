@@ -1,187 +1,148 @@
 package api
 
 import (
-	"image_cache/internal/img"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
-	"time"
+
+	domainimage "image_cache/internal/domain/image"
 )
 
-func TestStatusHandlerReturnsOK(t *testing.T) {
-	api := New()
+func newTestAPI(t *testing.T) (*Api, *fakeImage, *fakeCache) {
+	t.Helper()
 
+	image := &fakeImage{t: t}
+	cache := &fakeCache{t: t}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	return New(Config{
+		Image:  image,
+		Cache:  cache,
+		Logger: logger,
+	}), image, cache
+}
+
+func TestNewUsesInjectedDependencies(t *testing.T) {
+	instance, image, cache := newTestAPI(t)
+
+	if instance.image != image {
+		t.Fatal("ожидали переданную зависимость Image")
+	}
+
+	if instance.cache != cache {
+		t.Fatal("ожидали переданную зависимость Cache")
+	}
+}
+
+func TestStatusHandlerReturnsOK(t *testing.T) {
+	instance, _, _ := newTestAPI(t)
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()
 
-	api.Status(rec, req)
+	instance.Status(rec, req)
 
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ожидали статус 200, получили %d", rec.Code)
 	}
 
 	if rec.Body.String() != "Ok" {
 		t.Fatalf("ожидали тело Ok, получили %s", rec.Body.String())
-	}
-}
-
-func TestSaveCacheWritesCacheStateToFile(t *testing.T) {
-	dir := t.TempDir()
-	cachePath := filepath.Join(dir, "cache.json")
-
-	api := New()
-	api.cachePath = cachePath
-
-	api.cache.Set("test-key", img.DownloadResult{
-		Path:        "app-data/images/test.jpeg",
-		ContentType: "image/jpeg",
-		Size:        123,
-	}, 123)
-
-	err := api.SaveCache()
-	if err != nil {
-		t.Fatalf("не ожидали ошибку при сохранении кеша, получили %v", err)
-	}
-
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
-		t.Fatalf("не удалось прочитать файл кеша: %v", err)
-	}
-
-	content := string(data)
-
-	if !strings.Contains(content, "test-key") {
-		t.Fatalf("ожидали, что файл кеша содержит ключ test-key, получили %s", content)
-	}
-
-	if !strings.Contains(content, "app-data/images/test.jpeg") {
-		t.Fatalf("ожидали, что файл кеша содержит путь к файлу, получили %s", content)
-	}
-}
-
-func TestRestoreCacheLoadsCacheStateFromFile(t *testing.T) {
-	dir := t.TempDir()
-	cachePath := filepath.Join(dir, "cache.json")
-
-	api := New()
-	api.cachePath = cachePath
-
-	data := `[{"Key":"test-key","Value":{"Path":"app-data/images/test.jpeg","ContentType":"image/jpeg","Size":123},"Size":123}]`
-
-	err := os.WriteFile(cachePath, []byte(data), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить файл кеша: %v", err)
-	}
-
-	err = api.RestoreCache()
-	if err != nil {
-		t.Fatalf("не ожидали ошибку при восстановлении кеша, получили %v", err)
-	}
-
-	value, ok := api.cache.Get("test-key")
-	if !ok {
-		t.Fatal("ожидали, что ключ test-key появится в кеше после восстановления")
-	}
-
-	if value.Path != "app-data/images/test.jpeg" {
-		t.Fatalf("ожидали путь app-data/images/test.jpeg, получили %s", value.Path)
-	}
-
-	if value.ContentType != "image/jpeg" {
-		t.Fatalf("ожидали Content-Type image/jpeg, получили %s", value.ContentType)
-	}
-}
-
-func TestRestoreCacheReturnsNilWhenFileDoesNotExist(t *testing.T) {
-	dir := t.TempDir()
-	cachePath := filepath.Join(dir, "missing-cache.json")
-
-	api := New()
-	api.cachePath = cachePath
-
-	err := api.RestoreCache()
-	if err != nil {
-		t.Fatalf("не ожидали ошибку, если файл кеша не существует, получили %v", err)
 	}
 }
 
 func TestHandlerRoutesStatusRequest(t *testing.T) {
-	api := New()
-
+	instance, _, _ := newTestAPI(t)
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rec := httptest.NewRecorder()
 
-	api.Handler().ServeHTTP(rec, req)
+	instance.Handler().ServeHTTP(rec, req)
 
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-
-	if rec.Body.String() != "Ok" {
-		t.Fatalf("ожидали тело Ok, получили %s", rec.Body.String())
+	if rec.Code != http.StatusOK || rec.Body.String() != "Ok" {
+		t.Fatalf("неожиданный ответ: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 
 func TestHandlerRoutesImageRequest(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
-
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
+	instance, image, cache := newTestAPI(t)
+	result := domainimage.Image{
+		Path:        "virtual/cached.jpeg",
+		ContentType: "image/jpeg",
+		Size:        12,
 	}
 
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
+	cache.getFunc = func(key string) (domainimage.Image, bool) {
+		if key != "c52000873ea33e72fb89929688eee8cb" {
+			t.Fatalf("неожиданный ключ кеша: %s", key)
+		}
+		return result, true
+	}
+	image.readFunc = func(path string) ([]byte, error) {
+		if path != result.Path {
+			t.Fatalf("неожиданный путь изображения: %s", path)
+		}
+		return []byte("cached-image"), nil
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
 	rec := httptest.NewRecorder()
+	instance.Handler().ServeHTTP(rec, req)
 
-	api.Handler().ServeHTTP(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-
-	if rec.Body.String() != "image-bytes" {
-		t.Fatalf("ожидали тело image-bytes, получили %s", rec.Body.String())
+	if rec.Code != http.StatusOK || rec.Body.String() != "cached-image" {
+		t.Fatalf("неожиданный ответ: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 }
 
-func TestNewWithConfigUsesProvidedValues(t *testing.T) {
-	api := NewWithConfig("custom-images", "custom-cache.json", 7*time.Second, 12345)
-
-	if api.imgFolder != "custom-images" {
-		t.Fatalf("ожидали imgFolder custom-images, получили %s", api.imgFolder)
+func TestSaveCacheDelegatesToCache(t *testing.T) {
+	expectedErr := errors.New("save failed")
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "error", err: expectedErr},
 	}
 
-	if api.cachePath != "custom-cache.json" {
-		t.Fatalf("ожидали cachePath custom-cache.json, получили %s", api.cachePath)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, _, cache := newTestAPI(t)
+			cache.saveFunc = func() error { return tt.err }
+
+			err := instance.SaveCache()
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("ожидали ошибку %v, получили %v", tt.err, err)
+			}
+			if cache.saveCalls != 1 {
+				t.Fatalf("ожидали один вызов Cache.Save, получили %d", cache.saveCalls)
+			}
+		})
+	}
+}
+
+func TestRestoreCacheDelegatesToCache(t *testing.T) {
+	expectedErr := errors.New("restore failed")
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "error", err: expectedErr},
 	}
 
-	if api.timeout != 7*time.Second {
-		t.Fatalf("ожидали timeout 7s, получили %v", api.timeout)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instance, _, cache := newTestAPI(t)
+			cache.restoreFunc = func() error { return tt.err }
 
-	if api.cache == nil {
-		t.Fatal("ожидали, что cache будет создан")
+			err := instance.RestoreCache()
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("ожидали ошибку %v, получили %v", tt.err, err)
+			}
+			if cache.restoreCalls != 1 {
+				t.Fatalf("ожидали один вызов Cache.Restore, получили %d", cache.restoreCalls)
+			}
+		})
 	}
 }

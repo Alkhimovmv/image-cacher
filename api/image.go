@@ -2,9 +2,8 @@ package api
 
 import (
 	"errors"
-	"image_cache/internal/img"
+	domainimage "image_cache/internal/domain/image"
 	"net/http"
-	"os"
 )
 
 func (a *Api) Image(w http.ResponseWriter, r *http.Request) {
@@ -16,71 +15,53 @@ func (a *Api) Image(w http.ResponseWriter, r *http.Request) {
 
 	fileName := fileNameFromOrigin(origin)
 
-	a.mu.Lock()
 	cached, ok := a.cache.Get(fileName)
-	a.mu.Unlock()
 
 	if ok {
-		a.writeCachedImage(w, r, cached)
+		a.writeImage(w, r, cached, true)
 		return
 	}
 
-	result, err := a.download(origin, a.imgFolder, fileName, a.timeout)
+	result, err := a.image.Download(origin, fileName)
 	if err != nil {
 		a.handleDownloadError(w, r, err)
 		return
 	}
 
-	a.mu.Lock()
 	evicted := a.cache.Set(fileName, result, result.Size)
-	a.mu.Unlock()
-
-	err = a.removeEvictedFiles(evicted)
-	if err != nil {
-		a.logger.Error(
-			"failed to remove evicted image",
-			"method", r.Method,
-			"uri", r.RequestURI,
-			"host", r.Host,
-			"error", err,
-		)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	for _, item := range evicted {
+		if err := a.image.Remove(item.Path); err != nil {
+			a.logInternalError("failed to remove evicted image", r, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 
-	a.writeDownloadedImage(w, r, result)
+	a.writeImage(w, r, result, false)
 }
 
-func (a *Api) writeCachedImage(w http.ResponseWriter, r *http.Request, cached img.DownloadResult) {
-	data, err := os.ReadFile(cached.Path)
+func (a *Api) writeImage(w http.ResponseWriter, r *http.Request, image domainimage.Image, cacheHit bool) {
+	data, err := a.image.Read(image.Path)
 	if err != nil {
-		a.logger.Error(
-			"failed to read cached image",
-			"method", r.Method,
-			"uri", r.RequestURI,
-			"host", r.Host,
-			"error", err,
-		)
+		a.logInternalError("failed to read image", r, err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", cached.ContentType)
-	w.Header().Set("X-IMAGE-CACHE-HIT", "true")
+	w.Header().Set("Content-Type", image.ContentType)
+	if cacheHit {
+		w.Header().Set("X-IMAGE-CACHE-HIT", "true")
+	} else {
+		w.Header().Set("X-IMAGE-CACHE-HIT", "false")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
 }
 
 func (a *Api) handleDownloadError(w http.ResponseWriter, r *http.Request, err error) {
-	a.logger.Error(
-		"failed to download image",
-		"method", r.Method,
-		"uri", r.RequestURI,
-		"host", r.Host,
-		"error", err,
-	)
+	a.logInternalError("failed to download image", r, err)
 
-	var statusErr *img.StatusError
+	var statusErr *domainimage.StatusError
 	if errors.As(err, &statusErr) {
 		w.WriteHeader(statusErr.StatusCode)
 		return
@@ -89,22 +70,12 @@ func (a *Api) handleDownloadError(w http.ResponseWriter, r *http.Request, err er
 	w.WriteHeader(http.StatusInternalServerError)
 }
 
-func (a *Api) writeDownloadedImage(w http.ResponseWriter, r *http.Request, result img.DownloadResult) {
-	data, err := os.ReadFile(result.Path)
-	if err != nil {
-		a.logger.Error(
-			"failed to read downloaded image",
-			"method", r.Method,
-			"uri", r.RequestURI,
-			"host", r.Host,
-			"error", err,
-		)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", result.ContentType)
-	w.Header().Set("X-IMAGE-CACHE-HIT", "false")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+func (a *Api) logInternalError(message string, r *http.Request, err error) {
+	a.logger.Error(
+		message,
+		"method", r.Method,
+		"uri", r.RequestURI,
+		"host", r.Host,
+		"error", err,
+	)
 }

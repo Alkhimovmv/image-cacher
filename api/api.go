@@ -1,44 +1,27 @@
 package api
 
 import (
-	"image_cache/internal/img"
-	"image_cache/internal/lru"
 	"log/slog"
 	"net/http"
-	"os"
-	"sync"
-	"time"
 )
 
-const defaultMaxCacheSize = 50 * 1024 * 1024
+type Config struct {
+	Image  Image
+	Cache  Cache
+	Logger *slog.Logger
+}
 
 type Api struct {
-	imgFolder string
-	cachePath string
-	timeout   time.Duration
-	download  func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error)
-	cache     *lru.LRU[img.DownloadResult]
-	logger    *slog.Logger
-	mu        sync.Mutex
+	image  Image
+	cache  Cache
+	logger *slog.Logger
 }
 
-func New() *Api {
-	return NewWithConfig(
-		"app-data/images",
-		"app-data/cache/data.json",
-		5*time.Second,
-		defaultMaxCacheSize,
-	)
-}
-
-func NewWithConfig(imgFolder string, cachePath string, timeout time.Duration, maxCacheSize uint) *Api {
+func New(cfg Config) *Api {
 	return &Api{
-		imgFolder: imgFolder,
-		cachePath: cachePath,
-		timeout:   timeout,
-		download:  img.Download,
-		cache:     lru.New[img.DownloadResult](maxCacheSize),
-		logger:    slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		image:  cfg.Image,
+		cache:  cfg.Cache,
+		logger: cfg.Logger,
 	}
 }
 

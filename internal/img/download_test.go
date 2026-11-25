@@ -2,6 +2,7 @@ package img
 
 import (
 	"errors"
+	domainimage "image_cache/internal/domain/image"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestImageDownloadUsesConfiguredFolder(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("configured-image"))
+	}))
+	defer server.Close()
+
+	image := New(dir, 5*time.Second)
+	result, err := image.Download(server.URL, "configured-file")
+	if err != nil {
+		t.Fatalf("не удалось скачать изображение: %v", err)
+	}
+
+	if result.Path != filepath.Join(dir, "configured-file.jpeg") {
+		t.Fatalf("ожидали путь в настроенной директории, получили %s", result.Path)
+	}
+}
+
+func TestImageReadAndRemove(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cat.jpeg")
+	if err := os.WriteFile(path, []byte("image"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	image := New("unused", time.Second)
+	data, err := image.Read(path)
+	if err != nil || string(data) != "image" {
+		t.Fatalf("неожиданный результат чтения: %q, ошибка=%v", data, err)
+	}
+
+	if err := image.Remove(path); err != nil {
+		t.Fatalf("не удалось удалить изображение: %v", err)
+	}
+
+	if err := image.Remove(path); err != nil {
+		t.Fatalf("повторное удаление должно быть идемпотентным: %v", err)
+	}
+}
 
 func TestDownloadSavesImageToDisk(t *testing.T) {
 	dir := t.TempDir()
@@ -82,7 +124,7 @@ func TestDownloadReturnsStatusErrorForNonOKStatus(t *testing.T) {
 		t.Fatal("ожидали ошибку для ответа не 200 OK, получили nil")
 	}
 
-	var statusErr *StatusError
+	var statusErr *domainimage.StatusError
 	if !errors.As(err, &statusErr) {
 		t.Fatalf("ожидали ошибку типа StatusError, получили %v", err)
 	}

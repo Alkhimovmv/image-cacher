@@ -2,429 +2,231 @@ package api
 
 import (
 	"errors"
-	"image_cache/internal/img"
-	"image_cache/internal/lru"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"reflect"
 	"testing"
-	"time"
+
+	domainimage "image_cache/internal/domain/image"
 )
 
-func TestImageReturnsBadRequestWhenOriginIsMissing(t *testing.T) {
-	api := New()
+const (
+	testOrigin = "https://example.com/cat.jpg"
+	testKey    = "c52000873ea33e72fb89929688eee8cb"
+)
 
-	req := httptest.NewRequest(http.MethodGet, "/image", nil)
-	rec := httptest.NewRecorder()
+func TestImageReturnsBadRequestWithoutOrigin(t *testing.T) {
+	for _, target := range []string{"/image", "/image?origin="} {
+		t.Run(target, func(t *testing.T) {
+			instance, _, _ := newTestAPI(t)
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			rec := httptest.NewRecorder()
 
-	api.Image(rec, req)
+			instance.Image(rec, req)
 
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("ожидали статус 400, получили %d", resp.StatusCode)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("ожидали статус 400, получили %d", rec.Code)
+			}
+		})
 	}
 }
 
-func TestImageReturnsBadRequestWhenOriginIsEmpty(t *testing.T) {
-	api := New()
+func TestImageReturnsCachedImage(t *testing.T) {
+	instance, image, cache := newTestAPI(t)
+	result := domainimage.Image{Path: "virtual/cached.jpeg", ContentType: "image/jpeg", Size: 12}
 
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=", nil)
+	cache.getFunc = func(key string) (domainimage.Image, bool) {
+		if key != testKey {
+			t.Fatalf("ожидали ключ %s, получили %s", testKey, key)
+		}
+		return result, true
+	}
+	image.readFunc = func(path string) ([]byte, error) {
+		if path != result.Path {
+			t.Fatalf("ожидали путь %s, получили %s", result.Path, path)
+		}
+		return []byte("cached-image"), nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
 	rec := httptest.NewRecorder()
+	instance.Image(rec, req)
 
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("ожидали статус 400, получили %d", resp.StatusCode)
+	if rec.Code != http.StatusOK || rec.Body.String() != "cached-image" {
+		t.Fatalf("неожиданный ответ: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("ожидали Content-Type image/jpeg, получили %q", rec.Header().Get("Content-Type"))
+	}
+	if rec.Header().Get("X-IMAGE-CACHE-HIT") != "true" {
+		t.Fatalf("ожидали X-IMAGE-CACHE-HIT=true, получили %q", rec.Header().Get("X-IMAGE-CACHE-HIT"))
 	}
 }
 
-func TestImageCallsDownloadWhenOriginIsProvided(t *testing.T) {
-	called := false
+func TestImageDownloadsAndReturnsCacheMiss(t *testing.T) {
+	instance, image, cache := newTestAPI(t)
+	result := domainimage.Image{Path: "virtual/downloaded.jpeg", ContentType: "image/jpeg", Size: 11}
 
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		called = true
-		return img.DownloadResult{}, nil
+	cache.getFunc = func(key string) (domainimage.Image, bool) {
+		if key != testKey {
+			t.Fatalf("ожидали ключ %s, получили %s", testKey, key)
+		}
+		return domainimage.Image{}, false
+	}
+	image.downloadFunc = func(originURL string, fileName string) (domainimage.Image, error) {
+		if originURL != testOrigin || fileName != testKey {
+			t.Fatalf("неожиданные параметры Download: origin=%s fileName=%s", originURL, fileName)
+		}
+		return result, nil
+	}
+	cache.setFunc = func(key string, value domainimage.Image, size uint) []domainimage.Image {
+		if key != testKey || value != result || size != result.Size {
+			t.Fatalf("неожиданные параметры Set: key=%s value=%#v size=%d", key, value, size)
+		}
+		return nil
+	}
+	image.readFunc = func(path string) ([]byte, error) {
+		if path != result.Path {
+			t.Fatalf("ожидали путь %s, получили %s", result.Path, path)
+		}
+		return []byte("image-bytes"), nil
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
+	req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
 	rec := httptest.NewRecorder()
+	instance.Image(rec, req)
 
-	api.Image(rec, req)
-
-	if !called {
-		t.Fatal("ожидали, что обработчик вызовет скачивание изображения")
+	if rec.Code != http.StatusOK || rec.Body.String() != "image-bytes" {
+		t.Fatalf("неожиданный ответ: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("ожидали Content-Type image/jpeg, получили %q", rec.Header().Get("Content-Type"))
+	}
+	if rec.Header().Get("X-IMAGE-CACHE-HIT") != "false" {
+		t.Fatalf("ожидали X-IMAGE-CACHE-HIT=false, получили %q", rec.Header().Get("X-IMAGE-CACHE-HIT"))
 	}
 }
 
 func TestImageReturnsInternalServerErrorWhenDownloadFails(t *testing.T) {
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{}, errors.New("download failed")
+	instance, image, cache := newTestAPI(t)
+	cache.getFunc = func(string) (domainimage.Image, bool) { return domainimage.Image{}, false }
+	image.downloadFunc = func(string, string) (domainimage.Image, error) {
+		return domainimage.Image{}, errors.New("download failed")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
+	req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
 	rec := httptest.NewRecorder()
+	instance.Image(rec, req)
 
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("ожидали статус 500, получили %d", resp.StatusCode)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("ожидали статус 500, получили %d", rec.Code)
 	}
 }
 
-func TestImageSetsContentTypeFromDownloadResult(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
+func TestImageReturnsOriginStatusCode(t *testing.T) {
+	for _, statusCode := range []int{http.StatusNotFound, http.StatusCreated} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			instance, image, cache := newTestAPI(t)
+			cache.getFunc = func(string) (domainimage.Image, bool) { return domainimage.Image{}, false }
+			image.downloadFunc = func(string, string) (domainimage.Image, error) {
+				return domainimage.Image{}, &domainimage.StatusError{StatusCode: statusCode}
+			}
 
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
+			rec := httptest.NewRecorder()
+			instance.Image(rec, req)
 
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-
-	if resp.Header.Get("Content-Type") != "image/jpeg" {
-		t.Fatalf("ожидали Content-Type image/jpeg, получили %s", resp.Header.Get("Content-Type"))
+			if rec.Code != statusCode {
+				t.Fatalf("ожидали статус %d, получили %d", statusCode, rec.Code)
+			}
+		})
 	}
 }
 
-func TestImageSetsCacheHitHeaderToFalseForDownloadedImage(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
+func TestImageReturnsInternalServerErrorWhenReadFails(t *testing.T) {
+	for _, cacheHit := range []bool{true, false} {
+		t.Run(map[bool]string{true: "cached image", false: "downloaded image"}[cacheHit], func(t *testing.T) {
+			instance, image, cache := newTestAPI(t)
+			result := domainimage.Image{Path: "virtual/cat.jpeg", ContentType: "image/jpeg", Size: 5}
+			cache.getFunc = func(string) (domainimage.Image, bool) { return result, cacheHit }
+			if !cacheHit {
+				image.downloadFunc = func(string, string) (domainimage.Image, error) { return result, nil }
+				cache.setFunc = func(string, domainimage.Image, uint) []domainimage.Image { return nil }
+			}
+			image.readFunc = func(string) ([]byte, error) { return nil, errors.New("read failed") }
 
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
-	}
+			req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
+			rec := httptest.NewRecorder()
+			instance.Image(rec, req)
 
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-
-	if resp.Header.Get("X-IMAGE-CACHE-HIT") != "false" {
-		t.Fatalf("ожидали X-IMAGE-CACHE-HIT=false, получили %s", resp.Header.Get("X-IMAGE-CACHE-HIT"))
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("ожидали статус 500, получили %d", rec.Code)
+			}
+		})
 	}
 }
 
-func TestImageWritesDownloadedFileToResponse(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
+func TestImageRemovesEvictedImages(t *testing.T) {
+	instance, image, cache := newTestAPI(t)
+	result := domainimage.Image{Path: "virtual/new.jpeg", ContentType: "image/jpeg", Size: 3}
+	evicted := []domainimage.Image{{Path: "virtual/old-1.jpeg"}, {Path: "virtual/old-2.jpeg"}}
+	var calls []string
 
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
+	cache.getFunc = func(string) (domainimage.Image, bool) { return domainimage.Image{}, false }
+	image.downloadFunc = func(string, string) (domainimage.Image, error) { return result, nil }
+	cache.setFunc = func(string, domainimage.Image, uint) []domainimage.Image { return evicted }
+	image.removeFunc = func(path string) error {
+		calls = append(calls, "remove:"+path)
+		return nil
+	}
+	image.readFunc = func(path string) ([]byte, error) {
+		calls = append(calls, "read:"+path)
+		return []byte("new"), nil
 	}
 
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
+	req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
 	rec := httptest.NewRecorder()
+	instance.Image(rec, req)
 
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
+	if rec.Code != http.StatusOK || rec.Body.String() != "new" {
+		t.Fatalf("неожиданный ответ: status=%d body=%q", rec.Code, rec.Body.String())
 	}
-
-	if rec.Body.String() != "image-bytes" {
-		t.Fatalf("ожидали тело image-bytes, получили %s", rec.Body.String())
+	expectedCalls := []string{
+		"remove:virtual/old-1.jpeg",
+		"remove:virtual/old-2.jpeg",
+		"read:virtual/new.jpeg",
+	}
+	if !reflect.DeepEqual(calls, expectedCalls) {
+		t.Fatalf("неожиданный порядок вызовов: %#v", calls)
 	}
 }
 
-func TestImagePassesFolderAndTimeoutToDownload(t *testing.T) {
-	expectedFolder := "app-data/images"
-	expectedTimeout := 7 * time.Second
+func TestImageReturnsInternalServerErrorWhenEvictedImageRemovalFails(t *testing.T) {
+	instance, image, cache := newTestAPI(t)
+	result := domainimage.Image{Path: "virtual/new.jpeg", ContentType: "image/jpeg", Size: 3}
+	evicted := []domainimage.Image{{Path: "virtual/old.jpeg"}}
 
-	api := New()
-	api.imgFolder = expectedFolder
-	api.timeout = expectedTimeout
-
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		if folder != expectedFolder {
-			t.Fatalf("ожидали folder %s, получили %s", expectedFolder, folder)
+	cache.getFunc = func(string) (domainimage.Image, bool) { return domainimage.Image{}, false }
+	image.downloadFunc = func(string, string) (domainimage.Image, error) { return result, nil }
+	cache.setFunc = func(string, domainimage.Image, uint) []domainimage.Image { return evicted }
+	image.removeFunc = func(path string) error {
+		if path != evicted[0].Path {
+			t.Fatalf("ожидали путь %s, получили %s", evicted[0].Path, path)
 		}
-
-		if timeout != expectedTimeout {
-			t.Fatalf("ожидали timeout %v, получили %v", expectedTimeout, timeout)
-		}
-
-		return img.DownloadResult{
-			Path:        "/tmp/test-file.jpeg",
-			ContentType: "image/jpeg",
-			Size:        10,
-		}, nil
+		return errors.New("remove failed")
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
+	req := httptest.NewRequest(http.MethodGet, "/image?origin="+testOrigin, nil)
 	rec := httptest.NewRecorder()
+	instance.Image(rec, req)
 
-	api.Image(rec, req)
-}
-
-func TestImagePassesNonEmptyFileNameToDownload(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
-
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
-	}
-
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		if fileName == "" {
-			t.Fatal("ожидали, что обработчик передаст непустое имя файла")
-		}
-
-		if fileName == "temp-file" {
-			t.Fatal("ожидали, что обработчик перестанет использовать захардкоженное имя temp-file")
-		}
-
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("ожидали статус 500, получили %d", rec.Code)
 	}
 }
 
-func TestImagePassesMD5FileNameToDownload(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "test-file.jpeg")
-
-	err := os.WriteFile(filePath, []byte("image-bytes"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить тестовый файл: %v", err)
-	}
-
-	origin := "https://example.com/cat.jpg"
-	expectedFileName := "c52000873ea33e72fb89929688eee8cb"
-
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		if fileName != expectedFileName {
-			t.Fatalf("ожидали имя файла %s, получили %s", expectedFileName, fileName)
-		}
-
-		return img.DownloadResult{
-			Path:        filePath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("image-bytes")),
-		}, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin="+origin, nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-}
-
-func TestImageDoesNotDownloadWhenFileIsAlreadyCached(t *testing.T) {
-	dir := t.TempDir()
-	filePath := filepath.Join(dir, "cached-file.jpeg")
-
-	err := os.WriteFile(filePath, []byte("cached-image"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить кешированный файл: %v", err)
-	}
-
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		t.Fatal("не ожидали вызов download при cache hit")
-		return img.DownloadResult{}, nil
-	}
-
-	api.cache = lru.New[img.DownloadResult](50 * 1024 * 1024)
-	api.cache.Set("c52000873ea33e72fb89929688eee8cb", img.DownloadResult{
-		Path:        filePath,
-		ContentType: "image/jpeg",
-		Size:        uint(len("cached-image")),
-	}, uint(len("cached-image")))
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/cat.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("ожидали статус 200, получили %d", resp.StatusCode)
-	}
-
-	if resp.Header.Get("X-IMAGE-CACHE-HIT") != "true" {
-		t.Fatalf("ожидали X-IMAGE-CACHE-HIT=true, получили %s", resp.Header.Get("X-IMAGE-CACHE-HIT"))
-	}
-
-	if rec.Body.String() != "cached-image" {
-		t.Fatalf("ожидали тело cached-image, получили %s", rec.Body.String())
-	}
-}
-
-func TestImageReturnsOriginStatusCodeWhenDownloadFailsWithStatusError(t *testing.T) {
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{}, &img.StatusError{
-			StatusCode: http.StatusNotFound,
-		}
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/missing.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("ожидали статус 404, получили %d", resp.StatusCode)
-	}
-}
-
-func TestImageReturnsAnyOriginStatusCodeWhenDownloadFailsWithStatusError(t *testing.T) {
-	api := New()
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		return img.DownloadResult{}, &img.StatusError{
-			StatusCode: http.StatusForbidden,
-		}
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/forbidden.jpg", nil)
-	rec := httptest.NewRecorder()
-
-	api.Image(rec, req)
-
-	resp := rec.Result()
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("ожидали статус 403, получили %d", resp.StatusCode)
-	}
-}
-
-func TestImageRemovesEvictedFilesFromDisk(t *testing.T) {
-	dir := t.TempDir()
-	firstPath := filepath.Join(dir, "first.jpeg")
-	secondPath := filepath.Join(dir, "second.jpeg")
-
-	err := os.WriteFile(firstPath, []byte("first-image"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить первый файл: %v", err)
-	}
-
-	err = os.WriteFile(secondPath, []byte("second-image"), 0o644)
-	if err != nil {
-		t.Fatalf("не удалось подготовить второй файл: %v", err)
-	}
-
-	api := NewWithConfig(dir, filepath.Join(dir, "cache.json"), 5*time.Second, 15)
-
-	call := 0
-	api.download = func(originURL string, folder string, fileName string, timeout time.Duration) (img.DownloadResult, error) {
-		call++
-
-		if call == 1 {
-			return img.DownloadResult{
-				Path:        firstPath,
-				ContentType: "image/jpeg",
-				Size:        uint(len("first-image")),
-			}, nil
-		}
-
-		return img.DownloadResult{
-			Path:        secondPath,
-			ContentType: "image/jpeg",
-			Size:        uint(len("second-image")),
-		}, nil
-	}
-
-	firstReq := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/first.jpg", nil)
-	firstRec := httptest.NewRecorder()
-	api.Image(firstRec, firstReq)
-
-	secondReq := httptest.NewRequest(http.MethodGet, "/image?origin=https://example.com/second.jpg", nil)
-	secondRec := httptest.NewRecorder()
-	api.Image(secondRec, secondReq)
-
-	_, err = os.Stat(firstPath)
-	if !os.IsNotExist(err) {
-		t.Fatalf("ожидали, что первый файл будет удалён после вытеснения, получили ошибку %v", err)
+func TestFileNameFromOriginUsesMD5(t *testing.T) {
+	if got := fileNameFromOrigin(testOrigin); got != testKey {
+		t.Fatalf("ожидали ключ %s, получили %s", testKey, got)
 	}
 }
